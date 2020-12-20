@@ -11,112 +11,132 @@
 #################################################
 
 import numpy as np
-# from collections import deque
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-import random
 
 class Network(nn.Module):
-    def __init__(self, input_size, output_size):
+    def __init__(self, input_size, output_size, learning_rate):
         super().__init__()
 
-        self.inp_layer      = nn.Linear(input_size, 128)
-        self.hidden_layer   = nn.Linear(128, 64)
+        self.inp_layer      = nn.Linear(input_size, 64)
+        self.hidden_layer1  = nn.Linear(64, 64)
+        # self.hidden_layer2  = nn.Linear(128, 64)
         self.out_layer      = nn.Linear(64, output_size)
+
+        self.optimizer = optim.Adam(self.parameters(), lr=learning_rate)
+        self.loss_function = nn.MSELoss()
 
 
     def forward(self, x):
         x = F.relu(self.inp_layer(x))
-        x = F.relu(self.hidden_layer(x))
+        x = F.relu(self.hidden_layer1(x))
+        # x = F.relu(self.hidden_layer2(x))
         x = self.out_layer(x)
         return x
 
 
 class ExperienceBuffer:
-    def __init__(self, maxsize, batch_size):
-        self.maxsize = maxsize
-        self.buffer = []
+    def __init__(self, n_state, maxsize, batch_size, dev):
+        self.dev            = dev
+        self.capacity       = maxsize
+        self.index_cntr     = 0
+
+        self.state_buffer   = np.zeros((maxsize, n_state), dtype=np.float32)
+        self.action_buffer  = np.zeros(maxsize, dtype=np.int32)
+        self.reward_buffer  = np.zeros(maxsize, dtype=np.float32)
+        self.n_state_buffer = np.zeros((maxsize, n_state), dtype=np.float32)
+        self.done_buffer    = np.zeros(maxsize, dtype=np.int32)
+
         self.sample_batch_size = batch_size
 
     def is_full(self):
-        if len(self.buffer) >= self.maxsize:
+        if self.index_cntr >= self.capacity:
             return True
         else:
             return False
 
-    def add(self, experience):
-        if self.is_full():
-            self.buffer.pop(0)
-        self.buffer.append(experience)
+    def add(self, state, action, reward, n_state, done):
+        i = self.index_cntr%self.capacity
+
+        self.state_buffer[i]    = state
+        self.action_buffer[i]   = action
+        self.reward_buffer[i]   = reward
+        self.n_state_buffer[i]  = n_state
+        self.done_buffer[i]     = done
+
+        self.index_cntr += 1
 
     def sample_batch(self):
-        return random.sample(self.buffer, self.sample_batch_size)
+        batch = np.random.choice(self.capacity, self.sample_batch_size, replace=False)
 
+        s   = torch.tensor(self.state_buffer[batch]).to(self.dev)
+        a   = self.action_buffer[batch]
+        r   = torch.tensor(self.reward_buffer[batch]).to(self.dev)
+        n_s = torch.tensor(self.n_state_buffer[batch]).to(self.dev)
+        d   = torch.tensor(self.done_buffer[batch]).to(self.dev)
+
+        return s,a,r,n_s,d
 
 
 class Agent:
     def __init__(self, environment, discount_factor, exp_buffer_size, batch_size, target_network_update_freq, learning_rate):
+        self.dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
         self.actions = environment.action_space
         self.state_dims = len(environment.observation_space.high)
         self.gamma = discount_factor
         self.batch_size = batch_size
-        self.experience_buffer = ExperienceBuffer(exp_buffer_size, self.batch_size)
+        self.batch_i = np.arange(self.batch_size, dtype=np.int32)
+        self.experience_buffer = ExperienceBuffer(self.state_dims, exp_buffer_size, self.batch_size, self.dev)
         self.C = target_network_update_freq
         self.Ci = 0
-        self.network = Network(self.state_dims, self.actions.n)
-        self.fixed_network = Network(self.state_dims, self.actions.n)
+        self.network = Network(self.state_dims, self.actions.n, learning_rate).to(self.dev)
+        self.fixed_network = Network(self.state_dims, self.actions.n, learning_rate).to(self.dev)
         self.__sync_target()
-        # self.optimizer = optim.SGD(self.network.parameters(), lr=learning_rate)
-        self.optimizer = optim.Adam(self.network.parameters(), lr=learning_rate)
-        self.dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 
     def __sync_target(self):
         self.fixed_network.load_state_dict(self.network.state_dict())
+        self.fixed_network.eval()
 
     def __handle_fixed_target(self):
         self.Ci += 1
-        if self.Ci >= self.C:
+        if self.Ci % self.C == 0:
             self.__sync_target()
-            self.Ci = 0
 
     def __update(self):
-        batch = self.experience_buffer.sample_batch()
+        s,a,r,n_s,d = self.experience_buffer.sample_batch()
 
-        y = torch.zeros(1,1,self.batch_size, device=self.dev ,requires_grad=False)
-        target = torch.zeros(1,1,self.batch_size, device=self.dev, requires_grad=False)
+        self.network.optimizer.zero_grad()
 
-        self.optimizer.zero_grad()
+        target      = r + ((1-d) * self.gamma * (torch.max(self.fixed_network(n_s), dim=1)[0]))
+        estimate    = self.network(s)[self.batch_i,a]
 
-        i = 0
-        # b[0]: state, b[1]: action, b[2]: reward, b[3]: next_state, b[4]: done or not
-        for b in batch:
-            y[:,:,i] = b[2]
-            if b[4]:
-                y[:,:,i] += self.gamma * torch.max(self.fixed_network(b[3]))
-            target[:,:,i] = self.network(b[0])[b[1]]
-            i += 1
-
-        loss = F.mse_loss(y, target)
+        loss = self.network.loss_function(target, estimate).to(self.dev)
         loss.backward()
 
-        torch.nn.utils.clip_grad_norm_(self.network.parameters(), 2.0)
-        self.optimizer.step()
-
+        # torch.nn.utils.clip_grad_norm_(self.network.parameters(), 2.0)
+        self.network.optimizer.step()
 
         self.__handle_fixed_target()
 
+        return loss.item()
+
     def add_experience(self, state, action, reward, next_state, done):
-        exp = (torch.from_numpy(state).float(), action, reward,
-               torch.from_numpy(next_state).float(), done)
-        self.experience_buffer.add(exp)
+        self.experience_buffer.add(state, action, reward, next_state, done)
         if self.experience_buffer.is_full():
-            self.__update()
+            loss = self.__update()
+            return loss
+        else:
+            return 0
+
 
     def action(self, state, eps_k):
-        if random.random() < eps_k:
+        if np.random.random() <= eps_k:
             return self.actions.sample()
         else:
-            q_values = self.network(torch.from_numpy(state).float())
+            s = torch.tensor([state]).to(self.dev)
+            q_values = self.network(s)
             return torch.argmax(q_values).item()

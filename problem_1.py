@@ -20,15 +20,17 @@ import torch
 SWT_RENDER              = [False, 100] # [render or not, if yes each N-th episode]
 
 # parameters
-PAR_N_MAX_EPISODES      = 900
-PAR_DISCOUNT_FACTOR     = 0.995
+PAR_N_MAX_EPISODES      = 600
+PAR_DISCOUNT_FACTOR     = 0.99
 PAR_EXP_BUFFER_SIZE     = 15000
-PAR_BATCH_SIZE          = 80
-PAR_TARGET_UPDATE_FREQ  = int(PAR_EXP_BUFFER_SIZE/PAR_BATCH_SIZE)
-PAR_LEARNING_RATE       = 0.0005
+PAR_BATCH_SIZE          = 64
+# PAR_TARGET_UPDATE_FREQ  = int(PAR_EXP_BUFFER_SIZE/PAR_BATCH_SIZE)
+PAR_TARGET_UPDATE_FREQ  = 100
+PAR_LEARNING_RATE       = 0.001
 PAR_EPS_MAX             = 0.99
 PAR_EPS_MIN             = 0.05
-PAR_EPS_Z               = int(0.925*PAR_N_MAX_EPISODES)
+# PAR_EPS_Z               = int(0.91*PAR_N_MAX_EPISODES)
+PAR_EPS_Z               = 350
 
 # definitions (these are not need to be changed during tuning for this assignment)
 DEF_ENV                 = 'LunarLander-v2'
@@ -57,22 +59,26 @@ def running_average(x, N):
 def training(env, agent):
     ep_rewards = []
     ep_num_of_steps = []
+    ep_avg_losses = []
     episodes = trange(PAR_N_MAX_EPISODES, desc='Episode: ', leave=True)
 
     ep = 0
     avg_rew = 0.0
 
-    while not agent.experience_buffer.is_full():
-        state = env.reset()
-        done = False
-        while not done:
-            action = agent.action(state, 1)
+    state = env.reset()
+    while True:
+        if agent.experience_buffer.is_full():
+            break
 
-            next_state, reward, done, _ = env.step(action)
+        action = env.action_space.sample()
+        next_state, reward, done, _ = env.step(action)
 
-            # adding experience to the buffer
-            agent.add_experience(state,action,reward,next_state,done)
-        env.close()
+        # adding experience to the buffer
+        agent.add_experience(state, action, reward, next_state, done)
+
+        if done:
+            env.close()
+            state = env.reset()
 
 
 
@@ -84,6 +90,7 @@ def training(env, agent):
         done = False
         state = env.reset()
         ep_total_reward = 0.0
+        ep_total_loss = 0.0
         t = 0
         while not done:
             if SWT_RENDER[0] and (ep%SWT_RENDER[1]==0):
@@ -95,15 +102,17 @@ def training(env, agent):
             next_state, reward, done, _ = env.step(action)
 
             # adding experience to the buffer
-            agent.add_experience(state, action, reward, next_state, done)
+            l = agent.add_experience(state, action, reward, next_state, done)
 
             ep_total_reward += reward
+            ep_total_loss += l
 
             state = next_state
             t += 1
 
         ep_rewards.append(ep_total_reward)
         ep_num_of_steps.append(t)
+        ep_avg_losses.append(ep_total_loss/t)
 
         env.close()
 
@@ -111,15 +120,20 @@ def training(env, agent):
         ep += 1
 
         episodes.set_description(
-            "Episode {} - Reward/Steps: {:.1f}/{} - Avg. Reward/Steps: {:.1f}/{}".format(
-                ep, ep_total_reward, t,
+            "Episode {} - Reward/Steps: {:.1f}/{} - Eps: {} - Avg. Reward/Steps: {:.1f}/{}".format(
+                ep, ep_total_reward, t, eps_k,
                 avg_rew,
                 running_average(ep_num_of_steps, DEF_N_EP_RUNNING_AVG)[-1]))
 
-    return ep_rewards, ep_num_of_steps
+        # if ep%100 == 0:
+        #     plt.plot(ep_total_loss)
+        #     plt.show()
 
 
-def plot_results(rewards, steps):
+    return ep_rewards, ep_num_of_steps, ep_avg_losses
+
+
+def plot_results(rewards, steps, losses):
     # Plot Rewards and steps
     fig, ax = plt.subplots(nrows=1, ncols=2, figsize=(16, 9))
     ax[0].plot([i for i in range(1, len(rewards) + 1)], rewards, label='Episode reward')
@@ -139,6 +153,10 @@ def plot_results(rewards, steps):
     ax[1].set_title('Total number of steps vs Episodes')
     ax[1].legend()
     ax[1].grid(alpha=0.3)
+
+    plt.figure()
+    plt.plot(losses)
+
     plt.show()
 
 
@@ -151,6 +169,6 @@ if __name__ == '__main__':
     env = init_environment()
     agent = Agent(env, PAR_DISCOUNT_FACTOR, PAR_EXP_BUFFER_SIZE, PAR_BATCH_SIZE, PAR_TARGET_UPDATE_FREQ, PAR_LEARNING_RATE)
 
-    rewards, steps = training(env, agent)
+    rewards, steps, losses = training(env, agent)
     save_network(agent)
-    plot_results(rewards, steps)
+    plot_results(rewards, steps, losses)
