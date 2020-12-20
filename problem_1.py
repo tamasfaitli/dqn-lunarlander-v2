@@ -41,6 +41,10 @@ DEF_REWARD_THRESHOLD    = 50.0
 
 # function definitions
 def init_environment():
+    '''
+
+    :return:
+    '''
     env = gym.make(DEF_ENV)
     env.reset()
     return env
@@ -57,6 +61,12 @@ def running_average(x, N):
     return y
 
 def training(env, agent):
+    '''
+
+    :param env:
+    :param agent:
+    :return:
+    '''
     ep_rewards = []
     ep_num_of_steps = []
     ep_avg_losses = []
@@ -65,6 +75,7 @@ def training(env, agent):
     ep = 0
     avg_rew = 0.0
 
+    # filling replay buffer
     state = env.reset()
     while True:
         if agent.experience_buffer.is_full():
@@ -80,13 +91,13 @@ def training(env, agent):
             env.close()
             state = env.reset()
 
-
-
+    # train till either performance is acceptable or all episodes expire
     while (avg_rew <= DEF_REWARD_THRESHOLD) and (ep < PAR_N_MAX_EPISODES):
 
+        # epsilon decay for epsilon-greedy policy
         eps_k = max(PAR_EPS_MIN, PAR_EPS_MAX-((PAR_EPS_MAX-PAR_EPS_MIN)*(ep)/(PAR_EPS_Z-1)))
 
-        # new episode
+        # init new episode
         done = False
         state = env.reset()
         ep_total_reward = 0.0
@@ -96,20 +107,24 @@ def training(env, agent):
             if SWT_RENDER[0] and (ep%SWT_RENDER[1]==0):
                 env.render()
 
-
+            # evaluate epsilon-greedy policy
             action = agent.action(state, eps_k)
 
+            # step the environment
             next_state, reward, done, _ = env.step(action)
 
             # adding experience to the buffer
             l = agent.add_experience(state, action, reward, next_state, done)
 
+            # update episode measures
             ep_total_reward += reward
             ep_total_loss += l
 
+            # prepare for next episode
             state = next_state
             t += 1
 
+        # save episode measures
         ep_rewards.append(ep_total_reward)
         ep_num_of_steps.append(t)
         ep_avg_losses.append(ep_total_loss/t)
@@ -124,11 +139,6 @@ def training(env, agent):
                 ep, ep_total_reward, t, eps_k,
                 avg_rew,
                 running_average(ep_num_of_steps, DEF_N_EP_RUNNING_AVG)[-1]))
-
-        # if ep%100 == 0:
-        #     plt.plot(ep_total_loss)
-        #     plt.show()
-
 
     return ep_rewards, ep_num_of_steps, ep_avg_losses
 
@@ -161,14 +171,22 @@ def plot_results(rewards, steps, losses):
 
 
 def save_network(agent):
-    torch.save(agent.network, DEF_OUTP_FILE+".pth")
+    '''
 
+    :param agent: Agent containing the DQN network
+    :return:
+    '''
+    torch.save(agent.network, DEF_OUTP_FILE+".pth")
 
 # main
 if __name__ == '__main__':
+    # initializing environment
     env = init_environment()
+    # initializing agent
     agent = Agent(env, PAR_DISCOUNT_FACTOR, PAR_EXP_BUFFER_SIZE, PAR_BATCH_SIZE, PAR_TARGET_UPDATE_FREQ, PAR_LEARNING_RATE)
-
+    # train the agent
     rewards, steps, losses = training(env, agent)
+    # save network file
     save_network(agent)
+    # plot rewards, steps, and loss
     plot_results(rewards, steps, losses)
